@@ -108,6 +108,20 @@ dialog[open]::backdrop{animation:fade .3s ease both}
 .pay label{transition:border-color .2s,background .2s,transform .15s}
 .pay label:active{transform:scale(.97)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
+
+#toasts{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:50;display:flex;flex-direction:column;gap:8px;max-width:min(360px,calc(100vw - 32px))}
+.toast{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--b);border-radius:10px;padding:12px 14px;box-shadow:0 8px 30px #000a;font-size:14px;animation:pop .3s both;cursor:pointer}
+.toast.ok{border-left-color:var(--ok)}
+.toast.out{opacity:0;transform:translateX(20px);transition:opacity .3s,transform .3s}
+.st.active{background:#34d39922;color:var(--ok)}.st.unused{background:#3b82f622;color:#93c5fd}.st.expired{background:#f59e0b22;color:#fbbf24}.st.revoked{background:#f8717122;color:var(--bad)}
+.newtag{font-size:11px;font-weight:700;letter-spacing:.08em;padding:2px 8px;border-radius:99px;background:var(--ok);color:#052e1f;margin-left:6px;animation:glow 2s ease-in-out infinite}
+code.u{font-size:12px;color:#93c5fd;word-break:break-all}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+.icon{background:none;border:0;color:var(--mu);cursor:pointer;min-height:32px;padding:0 8px;border-radius:6px}
+.icon:hover{color:#fff;background:#7c3aed33}
+.icon.bad:hover{color:var(--bad);background:#f8717122}
+.chip.app{display:inline-flex;align-items:center;gap:6px}
+dialog.wide{width:min(640px,94vw)}
 </style>
 </head>
 <body>
@@ -157,7 +171,8 @@ const PAY={mpaisa:"M-PAiSA number: 9374678",binance:"Binance Pay ID (UID): 88825
 const LIVE=!FB.apiKey.startsWith("YOUR_")&&window.firebase;
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let me=null,items=[],orders=[],cat='All',tab='store',mode='login';
+let me=null,items=[],orders=[],users=[],usersErr='',regBusy=false,authMsg='',cat='All',tab='store',mode='login';
+let plans=[],apps=[],fields=[],licenses=[],v2Err='',appSel='',verSel='',fieldsEditable=true,dc=null,fresh=new Set();
 
 /* ---- data layer: Firestore when configured, localStorage demo otherwise ---- */
 let auth,fs;
@@ -191,8 +206,11 @@ async function doLogin(email,pw){
  ls.set('nx_sess',u.uid);boot();
 }
 async function doRegister(name,email,pw){
- if(LIVE){const r=await auth.createUserWithEmailAndPassword(email,pw);
-  await fs.collection('users').doc(r.user.uid).set({email,name,role:'customer'});return}
+ if(LIVE){regBusy=true;
+  try{const r=await auth.createUserWithEmailAndPassword(email,pw);
+   await fs.collection('users').doc(r.user.uid).set({email,name,role:'customer'})}
+  finally{regBusy=false}
+  boot();return}
  const us=ls.get('nx_users',[]);
  if(us.some(u=>u.email===email.toLowerCase()))throw new Error('Email already registered.');
  const u={uid:uid(),email:email.toLowerCase(),pass:pw,name,role:'customer'};us.push(u);ls.set('nx_users',us);ls.set('nx_sess',u.uid);boot();
@@ -200,13 +218,15 @@ async function doRegister(name,email,pw){
 async function loadMe(){
  if(LIVE){const u=auth.currentUser;if(!u)return null;
   const d=await fs.collection('users').doc(u.uid).get();
-  const x=d.exists?d.data():{role:'customer',name:u.email};
+  if(!d.exists){authMsg='This account has been removed. Contact an admin.';await auth.signOut();return null}
+  const x=d.data();
   return {uid:u.uid,email:u.email,name:x.name||u.email,role:x.role||'customer'};}
  const id=ls.get('nx_sess');return ls.get('nx_users',[]).find(u=>u.uid===id)||null;
 }
 async function boot(){
+ if(regBusy)return;
  me=await loadMe();
- if(!me){$('#app').classList.add('hide');$('#auth').classList.remove('hide');return}
+ if(!me){$('#app').classList.add('hide');$('#auth').classList.remove('hide');if(authMsg){$('#aerr').textContent=authMsg;authMsg=''}return}
  $('#auth').classList.add('hide');$('#app').classList.remove('hide');
  $('#role').textContent=me.role;$('#role').className='role '+(me.role==='admin'?'admin':'');
  $('#heroP').textContent=me.role==='admin'?'Admin console: manage cheats, banners and customer orders.':'Welcome back, '+me.name+'. Browse PC and Mobile cheats.';
@@ -218,6 +238,14 @@ async function refresh(){
  items=await DB.list('items');
  let o=await DB.list('orders');
  orders=me.role==='admin'?o:o.filter(x=>x.uid===me.uid);
+ users=[];usersErr='';
+ if(me.role==='admin'){try{users=(await DB.list('users')).map(u=>({id:u.id||u.uid,name:u.name,email:u.email,role:u.role}))}catch(e){usersErr='Could not load users. Check your Firestore rules allow admins to read the users collection.'}}
+ plans=[];apps=[];fields=[];licenses=[];v2Err='';
+ if(me.role==='admin'){
+  if(!apiCfg().url||!apiCfg().token)v2Err='Backend not connected yet. Set your backend URL and admin token.';
+  else{try{const [p,a,l]=await Promise.all([api('GET','/admin/plans'),api('GET','/admin/apps'),api('GET','/admin/licenses')]);plans=p.plans;apps=a.apps;licenses=l.licenses;try{dc=await api('GET','/admin/discord')}catch(e){dc=null}await loadFields()}catch(e){v2Err='Could not reach the backend: '+e.message}}
+ }
+ checkApproved();
  nav();render();
 }
 
@@ -237,9 +265,9 @@ $('#out').onclick=async()=>{if(LIVE)await auth.signOut();else{localStorage.remov
 
 /* ---- navigation + views ---- */
 function nav(){
- const t=me.role==='admin'?[['store','Store'],['orders','Orders ('+orders.filter(o=>o.status==='pending').length+')'],['subs','Subscriptions']]:[['store','Store'],['lib','My Orders']];
+ const t=me.role==='admin'?[['store','Store'],['orders','Orders ('+orders.filter(o=>o.status==='pending').length+')'],['users','Users ('+users.length+')'],['lic','Licenses'],['apps','App Controls'],['discord','Discord'],['subs','KeyAuth (legacy)']]:[['store','Store'],['lib','My Orders'+(fresh.size?' ('+fresh.size+' new)':'')]];
  $('#nav').innerHTML=t.map(([k,l])=>`<button type="button" class="${tab===k?'on':''}" data-t="${k}">${l}</button>`).join('');
- $('#nav').querySelectorAll('button').forEach(b=>b.onclick=()=>{tab=b.dataset.t;nav();render()});
+ $('#nav').querySelectorAll('button').forEach(b=>b.onclick=()=>{if(tab==='lib'&&b.dataset.t!=='lib')clearFresh();tab=b.dataset.t;nav();render()});
 }
 let kaT;
 function render(){
@@ -247,6 +275,10 @@ function render(){
  const v=$('#view');v.classList.remove('view-in');void v.offsetWidth;v.classList.add('view-in');
  if(tab==='store')v.innerHTML=storeHTML();
  else if(tab==='subs'&&me.role==='admin'){v.innerHTML=subsHTML();subsGo()}
+ else if(tab==='users'&&me.role==='admin')v.innerHTML=usersHTML();
+ else if(tab==='lic'&&me.role==='admin')v.innerHTML=licHTML();
+ else if(tab==='apps'&&me.role==='admin')v.innerHTML=appsHTML();
+ else if(tab==='discord'&&me.role==='admin')v.innerHTML=discordHTML();
  else if(tab==='orders')v.innerHTML=ordersHTML(true);
  else v.innerHTML=ordersHTML(false);
  wire();
@@ -267,7 +299,7 @@ function card(i,n=0){
 }
 function subsHTML(){
  return `<div class="card" style="max-width:560px;margin:24px auto;text-align:center">
-  <h2 style="font-size:32px">Subscription management</h2>
+  <h2 style="font-size:32px">KeyAuth (legacy)</h2>
   <p style="color:var(--mu)">Licenses, keys and subscriptions are handled in your KeyAuth portal. Redirecting in <b id="kc">4</b>s…</p>
   <div class="row" style="justify-content:center;margin-top:16px">
    <a class="btn" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(KEYAUTH_URL)}" rel="noopener">Open KeyAuth portal now</a>
@@ -278,11 +310,18 @@ function subsGo(){
  $('#kx').onclick=()=>{clearInterval(kaT);c.parentElement.textContent='Redirect cancelled. Use the button to open the portal.'};
  kaT=setInterval(()=>{n--;if(c)c.textContent=n;if(n<=0){clearInterval(kaT);location.href=KEYAUTH_URL}},1000);
 }
+function usersHTML(){
+ if(usersErr)return `<div class="empty">${esc(usersErr)}</div>`;
+ if(!users.length)return '<div class="empty">No registered users yet.</div>';
+ const s=[...users].sort((a,b)=>(a.role===b.role?0:a.role==='admin'?-1:1)||String(a.email).localeCompare(String(b.email)));
+ return `<div class="bar"><h2 style="font-size:26px">Registered users</h2><span class="sp"></span><span class="tag">${users.length} total</span></div>
+ <div class="wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Change role</th><th>User ID</th><th>Delete</th></tr></thead><tbody>${s.map((u,n)=>`<tr style="--i:${Math.min(n,12)}"><td>${esc(u.name||'-')}</td><td>${esc(u.email)}</td><td><span class="role ${u.role==='admin'?'admin':''}">${esc(u.role||'customer')}</span></td><td>${u.id===me.uid?'<span style="color:var(--mu);font-size:13px">You</span>':`<select data-ur="${esc(u.id)}" aria-label="Role for ${esc(u.email)}" style="min-height:36px;width:auto"><option value="customer"${u.role!=='admin'?' selected':''}>customer</option><option value="admin"${u.role==='admin'?' selected':''}>admin</option></select>`}</td><td style="color:var(--mu);font-size:12px">${esc(u.id)}</td><td>${u.id===me.uid?'':`<button type="button" class="btn bad sm" data-ud="${esc(u.id)}" aria-label="Delete ${esc(u.email)}" title="Delete user"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg></button>`}</td></tr>`).join('')}</tbody></table></div>`;
+}
 function ordersHTML(adm){
  if(!orders.length)return '<div class="empty">No orders yet.</div>';
  return `<div class="wrap"><table><thead><tr><th>Item</th>${adm?'<th>Customer</th>':''}<th>Method</th><th>Reference</th><th>Status</th><th></th></tr></thead><tbody>${orders.map(o=>{
   const it=items.find(i=>i.id===o.itemId);
-  return `<tr style="--i:${Math.min(orders.indexOf(o),12)}"><td>${esc(o.title)}</td>${adm?`<td>${esc(o.email)}</td>`:''}<td>${esc(o.method)}</td><td>${esc(o.ref)}</td><td><span class="st ${o.status}">${o.status}</span></td><td>${
+  return `<tr style="--i:${Math.min(orders.indexOf(o),12)}"><td>${esc(o.title)}</td>${adm?`<td>${esc(o.email)}</td>`:''}<td>${esc(o.method)}</td><td>${esc(o.ref)}</td><td><span class="st ${o.status}">${o.status}</span>${!adm&&fresh.has(o.id)?'<span class="newtag">NEW</span>':''}</td><td>${
    adm?(o.status==='pending'?`<button type="button" class="btn sm" data-a="${o.id}">Approve</button> <button type="button" class="btn bad sm" data-r="${o.id}">Reject</button>`:''):
    (o.status==='approved'&&it?`<a class="btn sm" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(it.link)}" target="_blank" rel="noopener">Download</a>`:'')}</td></tr>`}).join('')}</tbody></table></div>`;
 }
@@ -293,6 +332,28 @@ function wire(){
  q('d',async id=>{if(confirm('Delete this item?')){await DB.del('items',id);refresh()}});
  q('a',id=>setOrder(id,'approved'));q('r',id=>setOrder(id,'rejected'));
  const a=$('#add');if(a)a.onclick=()=>itemDlg();
+ document.querySelectorAll('[data-ud]').forEach(b=>b.onclick=async()=>{
+  const u=users.find(x=>x.id===b.dataset.ud);if(!u)return;
+  if(!confirm('Delete user '+(u.email||u.id)+'?\n\nThey will lose access to the site. This cannot be undone.'))return;
+  try{await deleteUser(u.id);refresh()}catch(e){alert('Could not delete user: '+e.message)}
+ });
+ document.querySelectorAll('[data-ur]').forEach(s=>s.onchange=async()=>{
+  const u=users.find(x=>x.id===s.dataset.ur),nr=s.value;
+  if(!u||nr===u.role)return;
+  if(!confirm('Change '+(u.email||'this user')+' from '+u.role+' to '+nr+'?')){s.value=u.role;return}
+  try{await setRole(u.id,nr);refresh()}catch(e){alert('Could not change role: '+e.message);s.value=u.role}
+ });
+}
+async function setRole(id,role){
+ if(role!=='admin'&&role!=='customer')throw new Error('Invalid role');
+ if(id===me.uid)throw new Error('You cannot change your own role.');
+ if(LIVE){await fs.collection('users').doc(id).update({role})}
+ else{const a=ls.get('nx_users',[]);const u=a.find(x=>x.uid===id);if(u)u.role=role;ls.set('nx_users',a)}
+}
+async function deleteUser(id){
+ if(id===me.uid)throw new Error('You cannot delete your own account.');
+ if(LIVE){await fs.collection('users').doc(id).delete()}
+ else ls.set('nx_users',ls.get('nx_users',[]).filter(x=>x.uid!==id));
 }
 async function setOrder(id,s){const o=orders.find(x=>x.id===id);await DB.save('orders',{...o,status:s});refresh()}
 
@@ -318,7 +379,8 @@ function itemDlg(it={}){
   if(o.type==='sale'&&!o.priceFJD){$('#ferr').textContent='Enter a price for sale items.';return}
   if(o.type!=='sale'){o.priceFJD='';o.priceUSDT=''}
   const f=$('#f8').files[0];if(f)o.banner=await shrink(f);
-  try{await DB.save('items',o);dlg.close();refresh()}catch(e){$('#ferr').textContent=e.message}
+  try{await DB.save('items',o)}catch(e){$('#ferr').textContent=e.message;return}
+  dlg.close();refresh();discordItemEvent(it,o);
  };
 }
 function shrink(file){return new Promise(res=>{const im=new Image();im.onload=()=>{const w=Math.min(800,im.width),c=document.createElement('canvas');c.width=w;c.height=im.height*w/im.width;c.getContext('2d').drawImage(im,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',.72))};im.src=URL.createObjectURL(file)})}
@@ -339,6 +401,408 @@ function buyDlg(id){
   dlg.close();tab='lib';refresh();
  };
 }
+
+
+/* ====== v3: toasts, Nighthawks licensing (Flask backend), app controls ====== */
+function toast(msg,kind){
+ let box=$('#toasts');if(!box){box=document.createElement('div');box.id='toasts';box.setAttribute('aria-live','polite');document.body.appendChild(box)}
+ const t=document.createElement('div');t.className='toast '+(kind||'');t.textContent=msg;box.appendChild(t);
+ const kill=()=>{t.classList.add('out');setTimeout(()=>t.remove(),300)};t.onclick=kill;setTimeout(kill,6000);
+}
+async function copy(t){try{await navigator.clipboard.writeText(t);toast('Copied to clipboard','ok')}catch(e){prompt('Copy this:',t)}}
+
+/* approved-order flag + toast (customers) */
+function checkApproved(){
+ if(!me||me.role==='admin')return;
+ const k='nx_seen_'+me.uid,nk='nx_new_'+me.uid;
+ fresh=new Set(ls.get(nk,[]));
+ const ap=orders.filter(o=>o.status==='approved').map(o=>o.id);
+ if(localStorage.getItem(k)===null){ls.set(k,ap);return}
+ const seen=new Set(ls.get(k,[])),nw=ap.filter(id=>!seen.has(id));
+ if(!nw.length)return;
+ nw.forEach(id=>fresh.add(id));
+ ls.set(k,[...seen,...nw]);ls.set(nk,[...fresh]);
+ nw.slice(0,3).forEach(id=>{const o=orders.find(x=>x.id===id);toast('✅ Approved: '+o.title+' — your download is unlocked in My Orders','ok')});
+ if(nw.length>3)toast('+'+(nw.length-3)+' more orders approved','ok');
+}
+function clearFresh(){if(!me||!fresh.size)return;fresh=new Set();ls.set('nx_new_'+me.uid,[])}
+setInterval(async()=>{
+ if(!me||me.role==='admin'||document.hidden)return;
+ try{orders=(await DB.list('orders')).filter(x=>x.uid===me.uid);checkApproved();nav();if(tab==='lib')render()}catch(e){}
+},20000);
+
+/* ---- Flask backend connection ---- */
+const UNITS={minutes:1,hours:1,days:1,weeks:1,months:1,lifetime:1};
+const fmtDur=(v,u)=>u==='lifetime'?'Lifetime':v+' '+(+v===1?u.replace(/s$/,''):u);
+const fmtDate=t=>t?new Date(t*1000).toLocaleString():'—';
+const apiCfg=()=>{let u=(localStorage.getItem('nx_api_url')||'').trim().replace(/\/+$/,'');if(u&&!/^https?:\/\//i.test(u))u='https://'+u;return{url:u,token:(localStorage.getItem('nx_api_token')||'').trim()}};
+async function api(method,path,body){
+ const c=apiCfg();
+ const r=await fetch(c.url+'/api/v1'+path,{method,headers:{'X-Admin-Token':c.token,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+ let j={};try{j=await r.json()}catch(e){}
+ if(!r.ok||j.ok===false)throw new Error(j.message||('HTTP '+r.status));
+ return j;
+}
+async function loadFields(){
+ fields=[];const ap=apps.find(a=>a.id===appSel)||apps[0];if(!ap)return;
+ appSel=ap.id;if(!ap.versions.some(v=>v.version===verSel))verSel=ap.current_version;
+ const r=await api('GET','/admin/apps/'+ap.id+'/versions/'+encodeURIComponent(verSel)+'/fields');
+ fields=r.fields;fieldsEditable=r.editable;
+}
+
+/* ---- code samples for authentication ---- */
+function snippets(base,key,furl){
+ const K=key||'YOUR-LICENSE-KEY',V=base+'/api/v1/license/validate';
+ const curl=`# 1) activate / check the key (send the device HWID)
+curl -X POST "${V}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"key":"${K}","hwid":"DEVICE_HWID"}'`+(furl?`
+
+# 2) request the field (key must be activated first)
+curl "${furl}" \\
+  -H "X-License-Key: ${K}" \\
+  -H "X-HWID: DEVICE_HWID"`:'');
+ const python=`import hashlib, winreg, requests
+
+API = "${base}"
+KEY = "${K}"
+
+def get_hwid():
+    # Windows machine GUID, hashed so the raw value never leaves the PC
+    k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\\Microsoft\\Cryptography", 0,
+                       winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+    return hashlib.sha256(winreg.QueryValueEx(k, "MachineGuid")[0].encode()).hexdigest()
+
+def check_license():
+    r = requests.post(API + "/api/v1/license/validate",
+                      json={"key": KEY, "hwid": get_hwid()}, timeout=10)
+    data = r.json()
+    if r.status_code != 200 or not data.get("ok"):
+        raise SystemExit("License error: " + data.get("message", "unknown"))
+    return data  # app, version, plan, expires_at (None = lifetime)
+
+info = check_license()
+print("Licensed:", info["app"], "v" + info["version"], "-", info["plan"])`+(furl?`
+
+# request one field (needs the key to be activated, done above)
+FIELD_URL = "${furl}"
+r = requests.get(FIELD_URL, headers={"X-License-Key": KEY, "X-HWID": get_hwid()}, timeout=10)
+if r.status_code != 200:
+    raise SystemExit(r.json().get("message"))
+value = r.json()["value"]`:'');
+ const csharp=`using System;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Win32;
+
+static class Nighthawks
+{
+    const string Api = "${base}";
+    static readonly HttpClient Http = new HttpClient();
+
+    // Hashed Windows machine GUID
+    public static string Hwid()
+    {
+        using var k = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
+                                 .OpenSubKey(@"SOFTWARE\\Microsoft\\Cryptography");
+        var guid = (string)k.GetValue("MachineGuid");
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(guid))).ToLower();
+    }
+
+    // Usage: var info = await Nighthawks.CheckLicense("${K}");
+    public static async Task<JsonElement> CheckLicense(string key)
+    {
+        var json = JsonSerializer.Serialize(new { key, hwid = Hwid() });
+        var res = await Http.PostAsync(Api + "/api/v1/license/validate",
+                      new StringContent(json, Encoding.UTF8, "application/json"));
+        var root = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement.Clone();
+        if (!res.IsSuccessStatusCode || !root.GetProperty("ok").GetBoolean())
+            throw new Exception(root.GetProperty("message").GetString());
+        return root; // app, version, plan, expires_at
+    }`+(furl?`
+
+    // Usage: var value = await Nighthawks.GetField("${furl}", "${K}");
+    public static async Task<string> GetField(string url, string key)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Add("X-License-Key", key);
+        req.Headers.Add("X-HWID", Hwid());
+        var res = await Http.SendAsync(req);
+        var root = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        if (!res.IsSuccessStatusCode) throw new Exception(root.GetProperty("message").GetString());
+        return root.GetProperty("value").GetString();
+    }`:'')+`
+}`;
+ const javascript=`const API = "${base}";
+
+async function checkLicense(key, hwid) {
+  const r = await fetch(API + "/api/v1/license/validate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, hwid })
+  });
+  const data = await r.json();
+  if (!r.ok || !data.ok) throw new Error(data.message);
+  return data; // app, version, plan, expires_at
+}
+
+checkLicense("${K}", "DEVICE_HWID").then(console.log).catch(e => console.error(e.message));`+(furl?`
+
+async function getField(key, hwid) {
+  const r = await fetch("${furl}", {
+    headers: { "X-License-Key": key, "X-HWID": hwid }
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.message);
+  return data.value;
+}`:'');
+ return {curl,python,csharp,javascript};
+}
+function integPanel(furl){
+ const base=apiCfg().url||'https://YOURUSER.pythonanywhere.com',url=furl||base+'/api/v1/license/validate';
+ return `<label>${furl?'Field request URL (GET)':'Authentication endpoint (POST)'}</label>
+ <div class="row"><code class="u" style="flex:1;min-width:200px">${esc(url)}</code><button class="btn ghost sm" id="ic" type="button">Copy URL</button></div>
+ <div class="note">${furl?'Send the headers <b>X-License-Key</b> and <b>X-HWID</b>. The key must be activated first (call the validate endpoint once). Public fields need no headers.':'POST JSON <b>{"key","hwid"}</b>. A fresh key is activated on its first valid call and its timer starts. HWID-locked keys bind to the first device.'}</div>
+ <div class="tabs" style="margin:12px 0 8px">${[['curl','curl'],['python','Python'],['csharp','C#'],['javascript','JavaScript']].map(([k,l],i)=>`<button type="button" class="chip ${i?'':'on'}" data-lg="${k}">${l}</button>`).join('')}</div>
+ <textarea id="code" readonly wrap="off" class="mono" style="min-height:260px;white-space:pre;overflow:auto" aria-label="Code sample"></textarea>
+ <div class="note">Success: <b>200</b> + <b>{"ok":true,...}</b>. Failure: <b>{"ok":false,"code","message"}</b> with code invalid_key, revoked, hwid_required, hwid_mismatch, expired, not_activated, wrong_app or rate_limited.</div>
+ <div class="row" style="margin-top:8px"><button class="btn ghost sm" id="cc" type="button">Copy code</button></div>`;
+}
+function wireInteg(key,furl){
+ const base=apiCfg().url||'https://YOURUSER.pythonanywhere.com',S=snippets(base,key,furl),url=furl||base+'/api/v1/license/validate';
+ let cur='curl';const show=()=>{$('#code').value=S[cur]};
+ document.querySelectorAll('[data-lg]').forEach(b=>b.onclick=()=>{cur=b.dataset.lg;document.querySelectorAll('[data-lg]').forEach(x=>x.classList.toggle('on',x===b));show()});
+ $('#ic').onclick=()=>copy(url);$('#cc').onclick=()=>copy(S[cur]);show();
+}
+function integDlg(key,furl){
+ dlg.className='wide';
+ dlg.innerHTML=`<h2>${furl?'Field request':'License authentication'}</h2>${integPanel(furl)}<div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn" id="x" type="button">Close</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();wireInteg(key,furl);
+}
+
+/* ---- views ---- */
+const cfgBtn='<button type="button" class="btn ghost sm" data-act="cfg">Backend settings</button>';
+function licHTML(){
+ if(v2Err)return `<div class="empty">${esc(v2Err)}<div style="margin-top:16px">${cfgBtn}</div></div>`;
+ const L=licenses;
+ return `<div class="bar"><h2 style="font-size:26px">Nighthawks licenses</h2><span class="tag">${L.length} keys</span><span class="sp"></span>
+  ${cfgBtn}<button type="button" class="btn ghost sm" data-act="integ">Integration</button><button type="button" class="btn ghost sm" data-act="test">Test key</button><button type="button" class="btn ghost sm" data-act="plan">+ Subscription</button><button type="button" class="btn" data-act="gen">+ Generate keys</button></div>
+  <div class="row" style="margin-bottom:16px">${plans.length?plans.map(p=>`<span class="tag">${esc(p.name)} · ${esc(fmtDur(p.value,p.unit))} <button type="button" class="icon bad" style="min-height:20px;padding:0 4px" data-act="plandel" data-id="${esc(p.id)}" aria-label="Delete subscription ${esc(p.name)}">✕</button></span>`).join(' '):'<span style="color:var(--mu);font-size:14px">No subscriptions yet. Use “+ Subscription” to create daily, weekly, monthly or any plan you want.</span>'}</div>
+  ${L.length?`<div class="wrap"><table><thead><tr><th>Key</th><th>App</th><th>Subscription</th><th>Device lock</th><th>Status</th><th>Expires</th><th></th></tr></thead><tbody>${L.map((l,n)=>`<tr style="--i:${Math.min(n,12)}"><td class="mono">${esc(l.key)}${l.note?`<div style="color:var(--mu);font-size:12px;font-family:var(--bd)">${esc(l.note)}</div>`:''}</td><td>${esc(l.app||'—')}${l.version?` <span class="tag">v${esc(l.version)}</span>`:''}</td><td>${esc(l.plan)}<div style="color:var(--mu);font-size:12px">${esc(fmtDur(l.duration.value,l.duration.unit))}</div></td><td>${l.hwid_mode==='hwid'?'HWID locked':'Open'}${l.hwid_mode==='hwid'?`<div class="mono" style="color:var(--mu);font-size:11px;word-break:break-all">${esc(l.hwid||'not bound yet')}</div>`:''}</td><td><span class="st ${esc(l.status)}">${esc(l.status)}</span></td><td>${l.status==='unused'?'starts on first use':l.expires_at?esc(fmtDate(l.expires_at)):'never'}</td><td style="white-space:nowrap"><button type="button" class="icon" data-act="copy" data-t="${esc(l.key)}">Copy</button><button type="button" class="icon" data-act="lcode" data-t="${esc(l.key)}">Code</button>${l.hwid_mode==='hwid'&&l.hwid?`<button type="button" class="icon" data-act="lhw" data-id="${esc(l.id)}">Reset HWID</button>`:''}<button type="button" class="icon" data-act="lrev" data-id="${esc(l.id)}" data-st="${esc(l.status)}">${l.status==='revoked'?'Restore':'Revoke'}</button><button type="button" class="icon bad" data-act="ldel" data-id="${esc(l.id)}" aria-label="Delete key">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No keys yet. Click “Generate keys”.</div>'}`;
+}
+function appsHTML(){
+ if(v2Err)return `<div class="empty">${esc(v2Err)}<div style="margin-top:16px">${cfgBtn}</div></div>`;
+ const app=apps.find(a=>a.id===appSel)||apps[0];
+ const head=`<div class="bar"><h2 style="font-size:26px">App controls</h2><span class="sp"></span>${cfgBtn}${apps.map(a=>`<button type="button" class="chip ${app&&a.id===app.id?'on':''}" data-act="appsel" data-id="${esc(a.id)}">${esc(a.name)}</button>`).join('')}<button type="button" class="btn" data-act="appnew">+ New app</button></div>`;
+ if(!app)return head+'<div class="empty">No apps yet. Create one (for example “Nighthawks App”) and give it a version, then add fields to it.</div>';
+ const latest=fieldsEditable;
+ return head+`<div class="bar"><h2 style="font-size:22px">${esc(app.name)}</h2><span class="tag dl">Latest v${esc(app.current_version)}</span><span class="sp"></span>
+  <label for="vsel" style="margin:0">Version</label><select id="vsel" style="width:auto">${[...app.versions].reverse().map(v=>`<option value="${esc(v.version)}" ${v.version===verSel?'selected':''}>v${esc(v.version)}${v.version===app.current_version?' (latest)':''}</option>`).join('')}</select>
+  <button type="button" class="btn ghost sm" data-act="vrel">Release new version</button><button type="button" class="btn bad sm" data-act="appdel" data-id="${esc(app.id)}">Delete app</button></div>
+  ${latest?'':`<div class="note" style="margin:0 0 12px">You are viewing an older version. It is read-only; switch to v${esc(app.current_version)} to edit.</div>`}
+  <div class="note" style="margin:0 0 12px">Request URLs come from your backend. Protected fields need a valid, activated license key for this app; “public” fields need none. <b>Code</b> shows how to request a field from your tool.</div>
+  ${latest?`<div class="row" style="margin-bottom:12px;align-items:flex-end"><div style="flex:1;min-width:160px"><label for="fn" style="margin-top:0">Field name (e.g. AOB_Head)</label><input id="fn" autocomplete="off"></div><div style="flex:2;min-width:220px"><label for="fv" style="margin-top:0">Value</label><input id="fv" autocomplete="off"></div><label style="margin:0;display:flex;align-items:center;gap:6px;color:var(--tx)"><input type="checkbox" id="fp" style="width:auto;min-height:0"> Public</label><button type="button" class="btn" data-act="fadd">+ Add field</button></div><div class="err" id="ferr2" role="alert"></div>`:''}
+  ${fields.length?`<div class="wrap"><table><thead><tr><th>Field</th><th>Value</th><th>Access</th><th>Request URL</th><th></th></tr></thead><tbody>${fields.map((f,n)=>`<tr style="--i:${Math.min(n,12)}"><td class="mono">${esc(f.name)}</td><td class="mono" style="word-break:break-all">${esc(f.value)}</td><td><span class="st ${f.public?'active':'unused'}">${f.public?'public':'key required'}</span></td><td><code class="u">${esc(f.url)}</code><div><button type="button" class="icon" data-act="copy" data-t="${esc(f.url)}">Copy URL</button><button type="button" class="icon" data-act="fcode" data-t="${esc(f.url)}">Code</button></div></td><td>${latest?`<button type="button" class="btn bad sm" data-act="fdel" data-id="${esc(f.name)}" aria-label="Remove field ${esc(f.name)}">Remove</button>`:''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No fields in this version yet.</div>'}`;
+}
+
+/* ---- click handling (delegated, survives re-render) ---- */
+$('#view').addEventListener('change',async e=>{if(e.target.id==='vsel'){verSel=e.target.value;try{await loadFields();render()}catch(x){alert(x.message)}}});
+$('#view').addEventListener('click',async e=>{
+ const b=e.target.closest('[data-act]');if(!b||!me||me.role!=='admin')return;
+ const a=b.dataset.act,id=b.dataset.id;
+ try{
+  if(a==='copy')return copy(b.dataset.t);
+  if(a==='cfg')return cfgDlg();
+  if(a==='integ')return integDlg('');
+  if(a==='lcode')return integDlg(b.dataset.t);
+  if(a==='fcode')return integDlg('',b.dataset.t);
+  if(a==='gen')return genDlg();
+  if(a==='plan')return planDlg();
+  if(a==='test')return testDlg();
+  if(a==='plandel'){if(confirm('Delete this subscription? Existing keys keep their duration.')){await api('DELETE','/admin/plans/'+id);refresh()}return}
+  if(a==='lhw'){if(confirm('Reset the bound HWID for this key?')){await api('POST','/admin/licenses/'+id+'/reset-hwid');refresh()}return}
+  if(a==='lrev'){await api('POST','/admin/licenses/'+id+(b.dataset.st==='revoked'?'/restore':'/revoke'));refresh();return}
+  if(a==='ldel'){if(confirm('Delete this key permanently?')){await api('DELETE','/admin/licenses/'+id);refresh()}return}
+  if(a==='appsel'){appSel=+id;verSel='';await loadFields();render();return}
+  if(a==='appnew')return appDlg();
+  if(a==='vrel')return verDlg();
+  if(a==='appdel'){const ap=apps.find(x=>x.id===+id);if(ap&&confirm('Delete "'+ap.name+'" and ALL its versions and fields? Existing keys stay.')){await api('DELETE','/admin/apps/'+id);appSel='';verSel='';refresh()}return}
+  if(a==='fadd'){
+   const ap=apps.find(x=>x.id===appSel),n=$('#fn').value.trim(),v=$('#fv').value.trim(),er=$('#ferr2');
+   if(!/^[A-Za-z0-9_-]+$/.test(n)){er.textContent='Field name: letters, numbers, _ and - only.';return}
+   if(!v){er.textContent='Enter a value.';return}
+   await api('PUT','/admin/apps/'+ap.id+'/fields/'+encodeURIComponent(n),{value:v,public:$('#fp').checked});refresh();return}
+  if(a==='fdel'){if(confirm('Remove this field?')){await api('DELETE','/admin/apps/'+appSel+'/fields/'+encodeURIComponent(id));refresh()}return}
+ }catch(x){alert(x.message)}
+});
+
+/* ---- dialogs ---- */
+function cfgDlg(){
+ const c=apiCfg();dlg.className='';
+ dlg.innerHTML=`<h2>Backend settings</h2><div class="note" style="margin-top:6px">Your Flask backend (for example https://YOURUSER.pythonanywhere.com) and the admin token printed by <b>python3 app.py init</b>. Both are stored in this browser only. Use https so the browser allows the calls.</div>
+ <label for="c1">Backend URL</label><input id="c1" type="url" value="${esc(c.url)}" placeholder="https://YOURUSER.pythonanywhere.com" autocomplete="off">
+ <label for="c2">Admin token</label><input id="c2" type="password" value="${esc(c.token)}" autocomplete="off">
+ <div class="note" id="cr" role="status">Not tested yet.</div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn ghost" id="ct" type="button">Test</button><button class="btn" id="sv" type="button">Save</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+ const store=()=>{localStorage.setItem('nx_api_url',$('#c1').value.trim().replace(/\/+$/,''));localStorage.setItem('nx_api_token',$('#c2').value.trim())};
+ $('#ct').onclick=async()=>{store();$('#cr').textContent='Testing…';try{await api('GET','/admin/check');$('#cr').textContent='✅ Connected. Token accepted.'}catch(e){$('#cr').textContent='❌ '+e.message}};
+ $('#sv').onclick=()=>{store();dlg.close();refresh()};
+}
+function planDlg(){
+ dlg.className='';
+ dlg.innerHTML=`<h2>New subscription</h2><p style="color:var(--mu);margin:4px 0">Create any plan you want, e.g. Daily = 1 day, Weekly = 1 week.</p>
+ <label for="p1">Name</label><input id="p1" placeholder="Monthly">
+ <div class="row" style="margin-top:8px"><div style="flex:1"><label for="p2">Length</label><input id="p2" type="number" min="1" value="1"></div><div style="flex:1"><label for="p3">Unit</label><select id="p3">${Object.keys(UNITS).map(u=>`<option>${u}</option>`).join('')}</select></div></div>
+ <div class="err" id="ferr" role="alert"></div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn" id="sv" type="button">Create</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+ $('#sv').onclick=async()=>{const name=$('#p1').value.trim(),value=+$('#p2').value,unit=$('#p3').value;
+  if(!name){$('#ferr').textContent='Enter a name.';return}
+  try{await api('POST','/admin/plans',{name,value,unit});dlg.close();refresh()}catch(e){$('#ferr').textContent=e.message}};
+}
+function genDlg(){
+ if(!apps.length&&!confirm('No app created yet. Generate keys without an app?'))return;
+ dlg.className='';
+ dlg.innerHTML=`<h2>Generate license keys</h2>
+ <label for="g1">App</label><select id="g1">${apps.length?apps.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}</option>`).join(''):'<option value="">No app created yet</option>'}</select>
+ <div class="note" id="gv" style="margin-top:6px"></div>
+ <label for="g2">Subscription</label><select id="g2">${plans.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(fmtDur(p.value,p.unit))})</option>`).join('')}<option value="custom">Custom duration…</option></select>
+ <div id="gc" class="row ${plans.length?'hide':''}" style="margin-top:8px"><input id="g3" type="number" min="1" value="1" style="flex:1" aria-label="Custom length"><select id="g4" style="flex:1" aria-label="Custom unit">${Object.keys(UNITS).map(u=>`<option>${u}</option>`).join('')}</select></div>
+ <label for="g5">Device lock</label><select id="g5"><option value="hwid">HWID locked (binds to the first device)</option><option value="open">Open (works on any device)</option></select>
+ <label for="g6">Quantity (1–50)</label><input id="g6" type="number" min="1" max="50" value="1">
+ <label for="g7">Note (optional)</label><input id="g7" placeholder="Customer name, order ref…">
+ <div class="err" id="ferr" role="alert"></div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn" id="sv" type="button">Generate</button></div>`;
+ const ver=()=>{const a=apps.find(x=>String(x.id)===$('#g1').value);$('#gv').textContent=a?'Version picked automatically: v'+a.current_version:'Keys will not be tied to an app.'};
+ $('#g1').onchange=ver;ver();
+ $('#g2').onchange=e=>$('#gc').classList.toggle('hide',e.target.value!=='custom');
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+ $('#sv').onclick=async()=>{
+  const pv=$('#g2').value,req={hwid_mode:$('#g5').value,quantity:+$('#g6').value||1,note:$('#g7').value.trim()};
+  if($('#g1').value)req.app_id=+$('#g1').value;
+  if(pv==='custom')req.custom={value:+$('#g3').value,unit:$('#g4').value};else req.plan_id=+pv;
+  let made;
+  try{made=(await api('POST','/admin/licenses/generate',req)).licenses.map(l=>l.key)}catch(e){$('#ferr').textContent=e.message;return}
+  dlg.className='wide';
+  dlg.innerHTML=`<h2>${made.length} key${made.length>1?'s':''} created</h2><label for="kl">Keys</label><textarea id="kl" readonly rows="${Math.min(6,made.length+1)}" class="mono" style="min-height:0">${esc(made.join('\n'))}</textarea>
+  <div class="row" style="margin-top:8px"><button class="btn ghost sm" id="cp" type="button">Copy all keys</button></div>
+  <h3 style="font-size:22px;margin:20px 0 4px">Add it to your code</h3>${integPanel('')}
+  <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn" id="x" type="button">Done</button></div>`;
+  $('#cp').onclick=()=>copy(made.join('\n'));$('#x').onclick=()=>{dlg.close();refresh()};
+  wireInteg(made[0],'');
+ };
+}
+function testDlg(){
+ dlg.className='';
+ dlg.innerHTML=`<h2>Test a key</h2><div class="note" style="margin-top:6px">This calls the real public endpoint. A fresh key will be activated and its timer starts.</div>
+ <label for="t1">License key</label><input id="t1" class="mono" placeholder="NH-XXXX-XXXX-XXXX-XXXX">
+ <label for="t2">HWID (needed for HWID-locked keys)</label><input id="t2" class="mono">
+ <div class="note" id="tr2" role="status" style="min-height:44px">Result appears here.</div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Close</button><button class="btn" id="sv" type="button">Validate</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>{dlg.close();refresh()};
+ $('#sv').onclick=async()=>{
+  try{const r=await fetch(apiCfg().url+'/api/v1/license/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:$('#t1').value.trim(),hwid:$('#t2').value.trim()})});
+   const d=await r.json();
+   $('#tr2').textContent=d.ok?`✅ Valid: ${d.app||'no app'} ${d.version?'v'+d.version:''} · ${d.plan} · ${d.lifetime?'never expires':'expires '+fmtDate(d.expires_at)}`:'❌ '+d.message;
+  }catch(e){$('#tr2').textContent='❌ Could not reach the backend: '+e.message}};
+}
+function appDlg(){
+ dlg.className='';
+ dlg.innerHTML=`<h2>New app</h2><label for="a1">App name</label><input id="a1" placeholder="Nighthawks App"><label for="a2">First version</label><input id="a2" value="1.0.0">
+ <div class="err" id="ferr" role="alert"></div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn" id="sv" type="button">Create app</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+ $('#sv').onclick=async()=>{const name=$('#a1').value.trim(),version=$('#a2').value.trim();
+  if(!name){$('#ferr').textContent='Enter an app name.';return}
+  try{const r=await api('POST','/admin/apps',{name,version});appSel=r.app.id;verSel=r.app.current_version;dlg.close();refresh()}catch(e){$('#ferr').textContent=e.message}};
+}
+function verDlg(){
+ const ap=apps.find(x=>x.id===appSel);if(!ap)return;
+ dlg.className='';
+ dlg.innerHTML=`<h2>Release new version</h2><p style="color:var(--mu);margin:4px 0">All fields from v${esc(ap.current_version)} are copied into the new version. Older versions stay untouched.</p>
+ <label for="v1">New version</label><input id="v1" placeholder="1.1.0"><label for="v2">Release note (optional)</label><input id="v2">
+ <div class="err" id="ferr" role="alert"></div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn" id="sv" type="button">Release</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+ $('#sv').onclick=async()=>{const version=$('#v1').value.trim();
+  try{await api('POST','/admin/apps/'+ap.id+'/versions',{version,note:$('#v2').value.trim()});verSel=version;dlg.close();refresh()}catch(e){$('#ferr').textContent=e.message}};
+}
+
+
+/* ====== Discord: many channels, per-event routing, custom messages (webhooks live on the backend) ====== */
+async function discordItemEvent(old,o){
+ try{
+  if(!dc||!dc.channels||!dc.channels.length||!apiCfg().url)return;
+  let event;
+  if(!old.id)event='new_item';
+  else if(o.type==='sale'&&(String(old.priceFJD||'')!==String(o.priceFJD||'')||String(old.priceUSDT||'')!==String(o.priceUSDT||'')))event='price_change';
+  else return;
+  if(event==='new_item'&&(!dc.notify_new_item||!dc.routes.new_item.length))return;
+  if(event==='price_change'&&(!dc.notify_price_change||!dc.routes.price_change.length))return;
+  const r=await api('POST','/admin/discord/notify',{event,title:o.title,category:o.cat,type:o.type,price_fjd:o.priceFJD,price_usdt:o.priceUSDT,old_fjd:old.priceFJD||'',old_usdt:old.priceUSDT||'',description:o.desc||'',store_url:location.href.split('#')[0]});
+  if(r.sent)toast('📣 Posted to '+r.sent+' Discord channel'+(r.sent>1?'s':''),'ok');
+ }catch(e){toast('Discord post failed: '+e.message)}
+}
+function discordHTML(){
+ if(v2Err)return `<div class="empty">${esc(v2Err)}<div style="margin-top:16px">${cfgBtn}</div></div>`;
+ if(!dc||!dc.channels)return `<div class="empty">Your backend does not have the latest Discord feature yet. Upload the newest app.py and press Reload on PythonAnywhere.<div style="margin-top:16px">${cfgBtn}</div></div>`;
+ const chk='style="width:auto;min-height:0"',lbl='style="display:flex;align-items:center;gap:6px;color:var(--tx);margin:0"';
+ const boxes=(attr,key)=>dc.channels.length?dc.channels.map(c=>`<label ${lbl}><input type="checkbox" ${attr} value="${esc(c.id)}" ${key&&dc.routes[key].includes(c.id)?'checked':''} ${chk}> ${esc(c.name)}</label>`).join(''):'<span style="color:var(--mu);font-size:14px">Add a channel first.</span>';
+ return `<div class="bar"><h2 style="font-size:26px">Discord</h2><span class="tag">${dc.channels.length} channel${dc.channels.length===1?'':'s'}</span><span class="sp"></span>${cfgBtn}</div>
+ <div class="note" style="margin:0 0 12px">Each Discord channel has its own webhook (Channel settings → Integrations → Webhooks). Webhook URLs are saved on your backend only and are never shown again.</div>
+ <h3 style="font-size:22px;margin:8px 0">Channels</h3>
+ ${dc.channels.length?`<div class="wrap"><table><thead><tr><th>Name</th><th>Webhook</th><th></th></tr></thead><tbody>${dc.channels.map(c=>`<tr><td>${esc(c.name)}</td><td class="mono">${esc(c.masked)}</td><td style="white-space:nowrap"><button type="button" class="icon" data-act="chtest" data-id="${esc(c.id)}">Test</button><button type="button" class="icon" data-act="chedit" data-id="${esc(c.id)}">Edit</button><button type="button" class="icon bad" data-act="chdel" data-id="${esc(c.id)}">Remove</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty" style="padding:16px">No channels yet.</div>'}
+ <div class="row" style="margin-top:12px;align-items:flex-end"><div style="flex:1;min-width:140px"><label for="cn" style="margin-top:0">Channel name</label><input id="cn" maxlength="40" placeholder="#announcements" autocomplete="off"></div><div style="flex:2;min-width:220px"><label for="cw" style="margin-top:0">Webhook URL</label><input id="cw" type="password" placeholder="https://discord.com/api/webhooks/ID/TOKEN" autocomplete="off"></div><button type="button" class="btn" data-act="chadd">+ Add channel</button></div>
+ <div class="err" id="derr" role="alert"></div>
+ <h3 style="font-size:22px;margin:24px 0 8px">Automatic announcements</h3>
+ <div class="note" style="margin:0 0 10px"><label ${lbl}><input type="checkbox" id="dn1" ${chk} ${dc.notify_new_item?'checked':''}> <b>New store item</b></label><div class="row" style="margin-top:8px">${boxes('data-rt="new_item"','new_item')}</div></div>
+ <div class="note" style="margin:0 0 10px"><label ${lbl}><input type="checkbox" id="dn2" ${chk} ${dc.notify_price_change?'checked':''}> <b>Price change</b></label><div class="row" style="margin-top:8px">${boxes('data-rt="price_change"','price_change')}</div></div>
+ <div class="note" style="margin:0">Tick the channels each announcement should go to. Posts show the title, category and price only. Download links are never posted.</div>
+ <h3 style="font-size:22px;margin:24px 0 8px">Send a message</h3>
+ <label>Send to</label><div class="row">${boxes('data-sc','')}</div>
+ <label for="dt">Title (optional, makes it a styled card)</label><input id="dt" maxlength="200">
+ <label for="dm">Message</label><textarea id="dm" maxlength="2000" rows="5"></textarea>
+ <label style="display:flex;align-items:center;gap:8px;color:var(--tx)"><input type="checkbox" id="dp" ${chk}> Allow @everyone / @here / role pings</label>
+ <div class="row" style="margin-top:12px"><button type="button" class="btn" data-act="dsend">Send to Discord</button></div>`;
+}
+function chDlg(id){
+ const c=dc.channels.find(x=>x.id===+id);if(!c)return;dlg.className='';
+ dlg.innerHTML=`<h2>Edit channel</h2><label for="e1">Name</label><input id="e1" maxlength="40" value="${esc(c.name)}">
+ <label for="e2">New webhook URL (leave empty to keep the saved one)</label><input id="e2" type="password" autocomplete="off" placeholder="${esc(c.masked)}">
+ <div class="err" id="ferr" role="alert"></div>
+ <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn" id="sv" type="button">Save</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+ $('#sv').onclick=async()=>{const b={name:$('#e1').value.trim()},u=$('#e2').value.trim();if(u)b.webhook_url=u;
+  try{dc=await api('PUT','/admin/discord/channels/'+c.id,b);dlg.close();render()}catch(e){$('#ferr').textContent=e.message}};
+}
+$('#view').addEventListener('change',async e=>{
+ if(me?.role!=='admin')return;const t=e.target;let b;
+ if(t.id==='dn1')b={notify_new_item:t.checked};
+ else if(t.id==='dn2')b={notify_price_change:t.checked};
+ else if(t.dataset&&t.dataset.rt){const k=t.dataset.rt;b={['route_'+k]:[...document.querySelectorAll('[data-rt="'+k+'"]:checked')].map(x=>+x.value)}}
+ else return;
+ try{dc=await api('PUT','/admin/discord',b);toast('Saved','ok')}catch(x){alert(x.message);refresh()}
+});
+$('#view').addEventListener('click',async e=>{
+ const b=e.target.closest('[data-act]');if(!b||!me||me.role!=='admin')return;
+ const a=b.dataset.act,id=b.dataset.id;if(!['chadd','chedit','chtest','chdel','dsend'].includes(a))return;
+ const er=$('#derr');if(er)er.textContent='';
+ try{
+  if(a==='chedit')return chDlg(id);
+  if(a==='chadd'){const name=$('#cn').value.trim(),url=$('#cw').value.trim();if(!name||!url){er.textContent='Enter a channel name and its webhook URL.';return}dc=await api('POST','/admin/discord/channels',{name,webhook_url:url});toast('Channel added','ok');render();return}
+  if(a==='chtest'){await api('POST','/admin/discord/channels/'+id+'/test');toast('Test message sent','ok');return}
+  if(a==='chdel'){if(confirm('Remove this channel? Automatic posts to it will stop.')){dc=await api('DELETE','/admin/discord/channels/'+id);render()}return}
+  if(a==='dsend'){
+   const ids=[...document.querySelectorAll('[data-sc]:checked')].map(x=>+x.value),content=$('#dm').value.trim(),title=$('#dt').value.trim();
+   if(!ids.length){er.textContent='Pick at least one channel to send to.';return}
+   if(!content&&!title){er.textContent='Write a message first.';return}
+   b.disabled=true;try{const r=await api('POST','/admin/discord/send',{channel_ids:ids,content,title,allow_mentions:$('#dp').checked});toast('📣 Sent to '+r.sent+' channel'+(r.sent>1?'s':''),'ok');$('#dm').value='';$('#dt').value=''}finally{b.disabled=false}return}
+ }catch(x){if(er)er.textContent=x.message;else alert(x.message)}
+});
 
 /* ---- particle system ---- */
 (function(){

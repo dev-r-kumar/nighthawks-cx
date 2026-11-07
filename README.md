@@ -40,3 +40,15 @@ Error replies are `{"ok":false,"code":"...","message":"..."}` with codes: invali
   `POST .../licenses/<id>/revoke | restore | reset-hwid`, `DELETE .../licenses/<id>`
 
 Units: minutes, hours, days, weeks, months (30 days), lifetime.
+
+## Discord (admin endpoints)
+Each Discord channel has its own webhook. Webhook URLs are stored in the backend database and are never returned to the browser (only a masked version).
+- `GET /api/v1/admin/discord`: channels, routing and toggles
+- `POST /api/v1/admin/discord/channels` `{"name","webhook_url"}`; `PUT|DELETE .../channels/<id>`; `POST .../channels/<id>/test`
+- `PUT /api/v1/admin/discord` `{"notify_new_item","notify_price_change","route_new_item":[ids],"route_price_change":[ids]}`: choose which channels get each automatic post
+- `POST /api/v1/admin/discord/send` `{"channel_ids":[ids],"content","title","allow_mentions"}`: custom message to one or more channels
+- `POST /api/v1/admin/discord/notify` `{"event":"new_item|price_change","title","category","type","price_fjd","price_usdt","old_fjd","old_usdt","description","store_url"}`: the site calls this automatically
+
+An older single-webhook setup is converted automatically into a channel named "Main".
+
+Free PythonAnywhere accounts can only reach whitelisted sites. If sending fails with "could not reach Discord", check that discord.com is allowed for your account.

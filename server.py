@@ -23,12 +23,16 @@ Times are UNIX timestamps in seconds (UTC).
 import collections
 import functools
 import hmac
+import json
 import os
 import re
 import secrets
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 
 from flask import Flask, g, jsonify, request, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -102,6 +106,16 @@ CREATE TABLE IF NOT EXISTS licenses(
   expires_at INTEGER NOT NULL DEFAULT 0,
   note TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS settings(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discord_channels(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  webhook_url TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 """
 
 
@@ -123,6 +137,12 @@ def close_db(_exc):
 def init_db():
     con = sqlite3.connect(DB_PATH)
     con.executescript(SCHEMA)
+    old = con.execute("SELECT value FROM settings WHERE key='discord_webhook'").fetchone()
+    if old and not con.execute("SELECT 1 FROM discord_channels LIMIT 1").fetchone():
+        cur = con.execute("INSERT INTO discord_channels(name,webhook_url,created_at) VALUES('Main',?,?)", (old[0], int(time.time())))
+        for k in ("discord_route_new", "discord_route_price"):
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, json.dumps([cur.lastrowid])))
+        con.execute("DELETE FROM settings WHERE key='discord_webhook'")
     con.commit()
     con.close()
 
@@ -650,6 +670,289 @@ def licenses_reset_hwid(lid):
 @admin_only
 def licenses_delete(lid):
     return _license_action(lid, "DELETE FROM licenses WHERE id=?")
+
+
+# ---- Discord: many channels (one webhook each, stored here and never sent to browsers)
+WEBHOOK_RE = re.compile(r"^https://(?:(?:ptb|canary)\.)?(?:discord|discordapp)\.com/api(?:/v\d+)?/webhooks/(\d{5,25})/([A-Za-z0-9_-]{20,120})$")
+
+
+def get_setting(key, default=""):
+    row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    db().execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def route_ids(key):
+    try:
+        v = json.loads(get_setting(key, "[]"))
+    except ValueError:
+        v = []
+    return [x for x in v if isinstance(x, int)] if isinstance(v, list) else []
+
+
+def channel_json(r):
+    m = WEBHOOK_RE.match(r["webhook_url"])
+    return {"id": r["id"], "name": r["name"], "masked": f"webhooks/{m.group(1)}/••••{m.group(2)[-4:]}" if m else ""}
+
+
+def discord_status():
+    rows = db().execute("SELECT * FROM discord_channels ORDER BY name COLLATE NOCASE").fetchall()
+    ids = {r["id"] for r in rows}
+    return {
+        "configured": bool(rows),
+        "channels": [channel_json(r) for r in rows],
+        "routes": {
+            "new_item": [i for i in route_ids("discord_route_new") if i in ids],
+            "price_change": [i for i in route_ids("discord_route_price") if i in ids],
+        },
+        "notify_new_item": get_setting("discord_notify_new", "1") == "1",
+        "notify_price_change": get_setting("discord_notify_price", "1") == "1",
+    }
+
+
+def discord_post(url, payload):
+    """Send a message to one webhook. Returns (ok, message)."""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "DiscordBot (https://nighthawks-cx.github.io, 1.0)"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True, "sent"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 404):
+            return False, "that webhook no longer exists"
+        if e.code == 429:
+            return False, "Discord rate limit hit, try again in a few seconds"
+        return False, f"Discord returned error {e.code}"
+    except Exception as e:  # network / proxy / whitelist problems
+        return False, "could not reach Discord (" + type(e).__name__ + ")"
+
+
+def send_to_channels(ids, payload):
+    """Post to several channels. Returns (all_ok, summary_message, sent_count)."""
+    sent, failed = 0, []
+    for cid in ids:
+        r = db().execute("SELECT * FROM discord_channels WHERE id=?", (cid,)).fetchone()
+        if not r:
+            continue
+        ok, msg = discord_post(r["webhook_url"], payload)
+        if ok:
+            sent += 1
+        else:
+            failed.append(f"{r['name']}: {msg}")
+    return (not failed), "; ".join(failed), sent
+
+
+def clean_ids(value):
+    """Validate a list of existing channel ids. Returns list or None when invalid."""
+    if not isinstance(value, list):
+        return None
+    out = []
+    for x in value:
+        if not isinstance(x, int) or isinstance(x, bool):
+            return None
+        if db().execute("SELECT 1 FROM discord_channels WHERE id=?", (x,)).fetchone() and x not in out:
+            out.append(x)
+    return out
+
+
+def short(v, n):
+    return str(v or "").strip()[:n]
+
+
+def price_text(fjd, usdt):
+    parts = []
+    if short(fjd, 20):
+        parts.append("FJD " + short(fjd, 20))
+    if short(usdt, 20):
+        parts.append(short(usdt, 20) + " USDT")
+    return " / ".join(parts) or "—"
+
+
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_embed(b):
+    event = b.get("event")
+    title = short(b.get("title"), 200) or "Untitled"
+    store_url = short(b.get("store_url"), 300)
+    emb = {"footer": {"text": "Nighthawks Corporation"}, "timestamp": datetime.now(timezone.utc).isoformat()}
+    if store_url.startswith("https://"):
+        emb["url"] = store_url
+    if event == "new_item":
+        emb.update(title="🆕 New in the store: " + title, color=0x8B5CF6)
+        desc = short(b.get("description"), 300)
+        if desc:
+            emb["description"] = desc
+        paid = b.get("type") == "sale"
+        emb["fields"] = [
+            {"name": "Category", "value": short(b.get("category"), 40) or "—", "inline": True},
+            {"name": "Price" if paid else "Access", "value": price_text(b.get("price_fjd"), b.get("price_usdt")) if paid else "Free download", "inline": True},
+        ]
+    else:  # price_change
+        new_f, old_f = num(b.get("price_fjd")), num(b.get("old_fjd"))
+        if new_f is not None and old_f is not None and new_f < old_f:
+            emb.update(title="🔻 Price drop: " + title, color=0x34D399)
+        elif new_f is not None and old_f is not None and new_f > old_f:
+            emb.update(title="🔺 Price update: " + title, color=0xF59E0B)
+        else:
+            emb.update(title="💸 Price update: " + title, color=0xF59E0B)
+        emb["fields"] = [
+            {"name": "Before", "value": price_text(b.get("old_fjd"), b.get("old_usdt")), "inline": True},
+            {"name": "Now", "value": price_text(b.get("price_fjd"), b.get("price_usdt")), "inline": True},
+        ]
+    return emb
+
+
+@app.get("/api/v1/admin/discord")
+@admin_only
+def discord_get():
+    return jsonify({"ok": True, **discord_status()})
+
+
+@app.put("/api/v1/admin/discord")
+@admin_only
+def discord_put():
+    """Routing + toggles. Body (all optional): {"notify_new_item": bool, "notify_price_change": bool,
+    "route_new_item": [channel ids], "route_price_change": [channel ids]}"""
+    b = body()
+    if "notify_new_item" in b:
+        set_setting("discord_notify_new", "1" if b.get("notify_new_item") else "0")
+    if "notify_price_change" in b:
+        set_setting("discord_notify_price", "1" if b.get("notify_price_change") else "0")
+    for field, key in (("route_new_item", "discord_route_new"), ("route_price_change", "discord_route_price")):
+        if field in b:
+            ids = clean_ids(b.get(field))
+            if ids is None:
+                return err(400, "bad_request", field + " must be a list of channel ids.")
+            set_setting(key, json.dumps(ids))
+    db().commit()
+    return jsonify({"ok": True, **discord_status()})
+
+
+def _channel_fields(b, creating):
+    name = short(b.get("name"), 40)
+    url = str(b.get("webhook_url") or "").strip()
+    if (creating or "name" in b) and not name:
+        return None, "Give the channel a name."
+    if (creating or url) and not WEBHOOK_RE.match(url):
+        return None, "That does not look like a Discord webhook URL (https://discord.com/api/webhooks/ID/TOKEN)."
+    return (name, url), None
+
+
+@app.post("/api/v1/admin/discord/channels")
+@admin_only
+def channels_create():
+    vals, e = _channel_fields(body(), True)
+    if e:
+        return err(400, "bad_request", e)
+    first = not db().execute("SELECT 1 FROM discord_channels LIMIT 1").fetchone()
+    try:
+        cur = db().execute("INSERT INTO discord_channels(name,webhook_url,created_at) VALUES(?,?,?)", (vals[0], vals[1], now()))
+    except sqlite3.IntegrityError:
+        return err(409, "exists", "A channel with that name already exists.")
+    if first:  # the first channel receives the automatic posts until you change it
+        set_setting("discord_route_new", json.dumps([cur.lastrowid]))
+        set_setting("discord_route_price", json.dumps([cur.lastrowid]))
+    db().commit()
+    return jsonify({"ok": True, **discord_status()}), 201
+
+
+@app.put("/api/v1/admin/discord/channels/<int:cid>")
+@admin_only
+def channels_update(cid):
+    if not db().execute("SELECT 1 FROM discord_channels WHERE id=?", (cid,)).fetchone():
+        return err(404, "not_found", "Unknown channel.")
+    b = body()
+    vals, e = _channel_fields(b, False)
+    if e:
+        return err(400, "bad_request", e)
+    try:
+        if "name" in b:
+            db().execute("UPDATE discord_channels SET name=? WHERE id=?", (vals[0], cid))
+        if vals[1]:
+            db().execute("UPDATE discord_channels SET webhook_url=? WHERE id=?", (vals[1], cid))
+    except sqlite3.IntegrityError:
+        return err(409, "exists", "A channel with that name already exists.")
+    db().commit()
+    return jsonify({"ok": True, **discord_status()})
+
+
+@app.delete("/api/v1/admin/discord/channels/<int:cid>")
+@admin_only
+def channels_delete(cid):
+    db().execute("DELETE FROM discord_channels WHERE id=?", (cid,))
+    for key in ("discord_route_new", "discord_route_price"):
+        set_setting(key, json.dumps([i for i in route_ids(key) if i != cid]))
+    db().commit()
+    return jsonify({"ok": True, **discord_status()})
+
+
+@app.post("/api/v1/admin/discord/channels/<int:cid>/test")
+@admin_only
+def channels_test(cid):
+    ok, msg, sent = send_to_channels([cid], {"allowed_mentions": {"parse": []}, "embeds": [
+        {"title": "Nighthawks test", "description": "Connection works ✅", "color": 0x8B5CF6}]})
+    if not ok or not sent:
+        return err(502, "discord_error", msg or "Unknown channel.")
+    return jsonify({"ok": True})
+
+
+@app.post("/api/v1/admin/discord/send")
+@admin_only
+def discord_send():
+    """Drop a message. Body: {"channel_ids": [1, 2], "content": "...", "title": "optional", "allow_mentions": false}"""
+    b = body()
+    ids = clean_ids(b.get("channel_ids"))
+    if not ids:
+        return err(400, "bad_request", "Pick at least one channel.")
+    content = str(b.get("content") or "").strip()
+    title = short(b.get("title"), 200)
+    if not content and not title:
+        return err(400, "bad_request", "Write a message first.")
+    if len(content) > 2000:
+        return err(400, "bad_request", "Discord messages are limited to 2000 characters.")
+    payload = {"allowed_mentions": {"parse": ["everyone", "roles", "users"] if b.get("allow_mentions") else []}}
+    if title:
+        payload["embeds"] = [{"title": title, "description": content[:4000], "color": 0x8B5CF6,
+                              "footer": {"text": "Nighthawks Corporation"}}]
+    else:
+        payload["content"] = content
+    ok, msg, sent = send_to_channels(ids, payload)
+    if not ok:
+        return err(502, "discord_error", "Failed for " + msg + (f" (sent to {sent} other channel(s))" if sent else ""))
+    return jsonify({"ok": True, "sent": sent})
+
+
+@app.post("/api/v1/admin/discord/notify")
+@admin_only
+def discord_notify():
+    """Automatic store announcements, routed to the channels chosen for that event.
+    Body: {"event": "new_item"|"price_change", title, category, type, price_fjd, ...}"""
+    b = body()
+    event = b.get("event")
+    if event not in ("new_item", "price_change"):
+        return err(400, "bad_request", "event must be new_item or price_change.")
+    st = discord_status()
+    if not (st["notify_new_item"] if event == "new_item" else st["notify_price_change"]):
+        return jsonify({"ok": True, "sent": 0, "reason": "disabled"})
+    ids = st["routes"][event]
+    if not ids:
+        return jsonify({"ok": True, "sent": 0, "reason": "no_channel"})
+    ok, msg, sent = send_to_channels(ids, {"allowed_mentions": {"parse": []}, "embeds": [build_embed(b)]})
+    if not ok:
+        return err(502, "discord_error", "Failed for " + msg)
+    return jsonify({"ok": True, "sent": sent})
 
 
 # --------------------------------------------------------------------------- CLI
