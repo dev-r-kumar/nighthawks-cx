@@ -122,6 +122,13 @@ code.u{font-size:12px;color:#93c5fd;word-break:break-all}
 .icon.bad:hover{color:var(--bad);background:#f8717122}
 .chip.app{display:inline-flex;align-items:center;gap:6px}
 dialog.wide{width:min(640px,94vw)}
+
+.desc{color:var(--mu);font-size:14px;line-height:1.5;margin:6px 0 10px}
+.desc p{margin:4px 0}
+.desc ul{list-style:none;padding:0;margin:4px 0}
+.desc li{position:relative;padding-left:22px;margin:3px 0}
+.desc .dl-bullet li::before{content:"•";position:absolute;left:6px;color:var(--b)}
+.desc .dl-check li::before{content:"✓";position:absolute;left:2px;color:var(--ok);font-weight:700}
 </style>
 </head>
 <body>
@@ -165,13 +172,15 @@ document.documentElement.style.setProperty('--bgimg',"url('data:image/jpeg;base6
 /* ====== CONFIG ====== */
 const FB={apiKey:"AIzaSyARevY6wiIBsbmU_21Djw5oyrTbK359YSw",authDomain:"nighthawks-cx.firebaseapp.com",projectId:"nighthawks-cx",storageBucket:"nighthawks-cx.firebasestorage.app",messagingSenderId:"868631432089",appId:"1:868631432089:web:d8b46ed1ece7abd212a108"};
 const KEYAUTH_URL="https://keyauth.cc/app/"; /* your KeyAuth portal/dashboard link */
+const BACKEND_URL="https://nighthawks001.pythonanywhere.com"; /* your Flask backend (customers read licenses from it) */
+const DISCORD_INVITE=""; /* your Discord invite link, used by the Free trial button (can be overridden per item) */
 const PAY={mpaisa:"M-PAiSA number: 9374678",binance:"Binance Pay ID (UID): 888256151"};
 /* ==================== */
 
 const LIVE=!FB.apiKey.startsWith("YOUR_")&&window.firebase;
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let me=null,items=[],orders=[],users=[],usersErr='',regBusy=false,authMsg='',cat='All',tab='store',mode='login';
+let me=null,items=[],orders=[],users=[],usersErr='',regBusy=false,authMsg='',cat='PC',tab='store',mode='login';
 let plans=[],apps=[],fields=[],licenses=[],v2Err='',appSel='',verSel='',fieldsEditable=true,dc=null,fresh=new Set();
 
 /* ---- data layer: Firestore when configured, localStorage demo otherwise ---- */
@@ -265,7 +274,7 @@ $('#out').onclick=async()=>{if(LIVE)await auth.signOut();else{localStorage.remov
 
 /* ---- navigation + views ---- */
 function nav(){
- const t=me.role==='admin'?[['store','Store'],['orders','Orders ('+orders.filter(o=>o.status==='pending').length+')'],['users','Users ('+users.length+')'],['lic','Licenses'],['apps','App Controls'],['discord','Discord'],['subs','KeyAuth (legacy)']]:[['store','Store'],['lib','My Orders'+(fresh.size?' ('+fresh.size+' new)':'')]];
+ const t=me.role==='admin'?[['store','Store'],['orders','Orders ('+orders.filter(o=>o.status==='pending').length+')'],['users','Users ('+users.length+')'],['lic','Licenses'],['apps','App Controls'],['discord','Discord'],['subs','KeyAuth (legacy)']]:[['store','Store'],['lib','My Orders'+(fresh.size?' ('+fresh.size+' new)':'')],['mylic','My Licenses']];
  $('#nav').innerHTML=t.map(([k,l])=>`<button type="button" class="${tab===k?'on':''}" data-t="${k}">${l}</button>`).join('');
  $('#nav').querySelectorAll('button').forEach(b=>b.onclick=()=>{if(tab==='lib'&&b.dataset.t!=='lib')clearFresh();tab=b.dataset.t;nav();render()});
 }
@@ -279,23 +288,24 @@ function render(){
  else if(tab==='lic'&&me.role==='admin')v.innerHTML=licHTML();
  else if(tab==='apps'&&me.role==='admin')v.innerHTML=appsHTML();
  else if(tab==='discord'&&me.role==='admin')v.innerHTML=discordHTML();
+ else if(tab==='mylic'){v.innerHTML=myLicHTML();loadMyLic()}
  else if(tab==='orders')v.innerHTML=ordersHTML(true);
  else v.innerHTML=ordersHTML(false);
  wire();
 }
 function storeHTML(){
- const list=items.filter(i=>cat==='All'||i.cat===cat);
- return `<div class="bar">${['All','PC','Mobile'].map(c=>`<button type="button" class="chip ${cat===c?'on':''}" data-c="${c}">${c}</button>`).join('')}<span class="sp"></span>${me.role==='admin'?'<button type="button" class="btn" id="add">+ Add item</button>':''}</div>`+
+ const list=items.filter(i=>i.cat===cat);
+ return `<div class="bar">${['PC','Mobile'].map(c=>`<button type="button" class="chip ${cat===c?'on':''}" data-c="${c}">${c}</button>`).join('')}<span class="sp"></span>${me.role==='admin'?'<button type="button" class="btn" id="add">+ Add item</button>':''}</div>`+
  (list.length?`<div class="grid">${list.map((i,n)=>card(i,n)).join('')}</div>`:`<div class="empty">No items in this category yet.${me.role==='admin'?' Use "Add item" to publish one.':''}</div>`);
 }
 function card(i,n=0){
  const sale=i.type==='sale';
  return `<article class="item" style="--i:${Math.min(n,12)}">${i.banner?`<img class="img" src="${i.banner}" alt="${esc(i.title)} banner" loading="lazy">`:'<div class="img"></div>'}
- <div class="in"><div class="row"><span class="tag">${esc(i.cat)}</span><span class="tag ${sale?'':'dl'}">${sale?'For sale':'Free download'}</span></div>
- <h3>${esc(i.title)}</h3><p>${esc(i.desc)}</p>
+ <div class="in"><div class="row"><span class="tag">${esc(i.cat)}</span><span class="tag ${sale?'':'dl'}">${sale?'For sale':'Free download'}</span>${sale&&i.trial?'<span class="tag dl">Free trial</span>':''}</div>
+ <h3>${esc(i.title)}</h3>${descHTML(i)}
  <div class="row">${sale?`<span class="price">FJD ${esc(i.priceFJD)}<small style="font-size:13px;color:var(--mu)"> / ${esc(i.priceUSDT||'-')} USDT</small></span>`:''}<span style="flex:1"></span>
  ${me.role==='admin'?`<button type="button" class="btn ghost sm" data-e="${i.id}">Edit</button><button type="button" class="btn bad sm" data-d="${i.id}">Delete</button>`:
- sale?`<button type="button" class="btn sm" data-b="${i.id}">Buy now</button>`:`<a class="btn sm" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(i.link)}" target="_blank" rel="noopener">Download</a>`}</div></div></article>`;
+ sale?`${i.trial&&i.trialLink?`<button type="button" class="btn ghost sm" data-ft="${i.id}">Free trial</button>`:''}<button type="button" class="btn sm" data-b="${i.id}">Buy now</button>`:`<a class="btn sm" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(dlLink(i.link))}" target="_blank" rel="noopener">Download</a>`}</div></div></article>`;
 }
 function subsHTML(){
  return `<div class="card" style="max-width:560px;margin:24px auto;text-align:center">
@@ -323,12 +333,12 @@ function ordersHTML(adm){
   const it=items.find(i=>i.id===o.itemId);
   return `<tr style="--i:${Math.min(orders.indexOf(o),12)}"><td>${esc(o.title)}</td>${adm?`<td>${esc(o.email)}</td>`:''}<td>${esc(o.method)}</td><td>${esc(o.ref)}</td><td><span class="st ${o.status}">${o.status}</span>${!adm&&fresh.has(o.id)?'<span class="newtag">NEW</span>':''}</td><td>${
    adm?(o.status==='pending'?`<button type="button" class="btn sm" data-a="${o.id}">Approve</button> <button type="button" class="btn bad sm" data-r="${o.id}">Reject</button>`:''):
-   (o.status==='approved'&&it?`<a class="btn sm" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(it.link)}" target="_blank" rel="noopener">Download</a>`:'')}</td></tr>`}).join('')}</tbody></table></div>`;
+   (o.status==='approved'&&it?`<a class="btn sm" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(dlLink(it.link))}" target="_blank" rel="noopener">Download</a>`:'')}</td></tr>`}).join('')}</tbody></table></div>`;
 }
 function wire(){
  document.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>{cat=b.dataset.c;render()});
  const q=(a,f)=>document.querySelectorAll(`[data-${a}]`).forEach(b=>b.onclick=()=>f(b.dataset[a]));
- q('b',buyDlg);q('e',id=>itemDlg(items.find(i=>i.id===id)));
+ q('b',buyDlg);q('ft',trialDlg);q('e',id=>itemDlg(items.find(i=>i.id===id)));
  q('d',async id=>{if(confirm('Delete this item?')){await DB.del('items',id);refresh()}});
  q('a',id=>setOrder(id,'approved'));q('r',id=>setOrder(id,'rejected'));
  const a=$('#add');if(a)a.onclick=()=>itemDlg();
@@ -359,33 +369,82 @@ async function setOrder(id,s){const o=orders.find(x=>x.id===id);await DB.save('o
 
 /* ---- dialogs ---- */
 const dlg=$('#dlg');
+function descHTML(i){
+ const L=Array.isArray(i.descList)&&i.descList.length?i.descList:String(i.desc||'').split('\n').filter(x=>x.trim()).map(v=>({t:'text',v}));
+ let out='',cur=null;const close=()=>{if(cur){out+='</ul>';cur=null}};
+ for(const l of L){
+  if(l.t==='bullet'||l.t==='check'){if(cur!==l.t){close();out+='<ul class="dl-'+l.t+'">';cur=l.t}out+='<li>'+esc(l.v)+'</li>'}
+  else{close();out+='<p>'+esc(l.v)+'</p>'}
+ }
+ close();return '<div class="desc">'+out+'</div>';
+}
+/* MediaFire share links are sent through the backend, which redirects to the real file */
+const dlLink=u=>/^https?:\/\/(www\.)?mediafire\.com\//i.test(String(u||'').trim())&&apiCfg().url?apiCfg().url+'/api/v1/download/mediafire?url='+encodeURIComponent(String(u).trim()):u;
+const fixUrl=u=>{u=String(u||'').trim();return u&&!/^[a-z][a-z0-9+.-]*:/i.test(u)?'https://'+u:u};
+const safeUrl=u=>/^https?:\/\//i.test(String(u||'').trim())?String(u).trim():'';
 function itemDlg(it={}){
+ dlg.className='wide';
+ let L=(Array.isArray(it.descList)&&it.descList.length?it.descList:String(it.desc||'').split('\n').filter(x=>x.trim()).map(v=>({t:'text',v}))).map(x=>({t:x.t,v:x.v}));
  dlg.innerHTML=`<h2>${it.id?'Edit':'Add'} item</h2>
  <label for="f1">Title</label><input id="f1" value="${esc(it.title)}">
  <label for="f2">Category</label><select id="f2"><option>PC</option><option ${it.cat==='Mobile'?'selected':''}>Mobile</option></select>
  <label for="f3">Item type</label><select id="f3"><option value="download">Download only (free)</option><option value="sale" ${it.type==='sale'?'selected':''}>For sale</option></select>
- <div id="pr" class="${it.type==='sale'?'':'hide'}"><label for="f4">Price (FJD, M-PAiSA)</label><input id="f4" type="number" min="0" step="0.01" value="${esc(it.priceFJD)}"><label for="f5">Price (USDT, Binance Pay)</label><input id="f5" type="number" min="0" step="0.01" value="${esc(it.priceUSDT)}"></div>
- <label for="f6">Download link</label><input id="f6" type="url" placeholder="https://" value="${esc(it.link)}">
- <label for="f7">Description</label><textarea id="f7">${esc(it.desc)}</textarea>
+ <div id="pr" class="${it.type==='sale'?'':'hide'}"><label for="f4">Price (FJD, M-PAiSA)</label><input id="f4" type="number" min="0" step="0.01" value="${esc(it.priceFJD)}"><label for="f5">Price (USDT, Binance Pay)</label><input id="f5" type="number" min="0" step="0.01" value="${esc(it.priceUSDT)}">
+  <label style="display:flex;align-items:center;gap:8px;color:var(--tx);margin-top:14px"><input type="checkbox" id="ft1" style="width:auto;min-height:0" ${it.trial?'checked':''}> Offer a free trial (shows a “Free trial” button on this item)</label>
+  <div id="trw" class="${it.trial?'':'hide'}"><label for="ft2">Free trial download link</label><input id="ft2" type="url" placeholder="https://" value="${esc(it.trialLink)}"><label for="ft3">Discord invite link (where trial keys are given)</label><input id="ft3" type="url" placeholder="https://discord.gg/…" value="${esc(it.discordUrl)}"></div></div>
+ <label for="f6">Download link (paid items: customers get it after approval)</label><input id="f6" type="url" placeholder="https://" value="${esc(it.link)}">
+ <label>Description</label><div id="dl"></div>
+ <div class="row" style="margin-top:8px"><button type="button" class="btn ghost sm" data-add="text">+ Text</button><button type="button" class="btn ghost sm" data-add="bullet">+ Bullet</button><button type="button" class="btn ghost sm" data-add="check">+ Check</button></div>
  <label for="f8">Banner image</label><input id="f8" type="file" accept="image/*">
  <div class="err" id="ferr" role="alert"></div>
  <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn ghost" id="x" type="button">Cancel</button><button class="btn" id="sv" type="button">Save</button></div>`;
+ const paint=focus=>{
+  $('#dl').innerHTML=L.length?L.map((l,n)=>`<div class="row" style="margin-bottom:6px;flex-wrap:nowrap"><select data-n="${n}" data-k="t" aria-label="Line ${n+1} style" style="width:112px;flex:none"><option value="text" ${l.t==='text'?'selected':''}>Text</option><option value="bullet" ${l.t==='bullet'?'selected':''}>• Bullet</option><option value="check" ${l.t==='check'?'selected':''}>✓ Check</option></select><input data-n="${n}" data-k="v" value="${esc(l.v)}" aria-label="Line ${n+1} text" style="flex:1;min-width:0"><button type="button" class="icon" data-mv="${n}:-1" aria-label="Move line up">↑</button><button type="button" class="icon" data-mv="${n}:1" aria-label="Move line down">↓</button><button type="button" class="icon bad" data-rm="${n}" aria-label="Remove line">✕</button></div>`).join(''):'<div style="color:var(--mu);font-size:14px">No lines yet. Use the buttons below to add text, bullets or checks.</div>';
+  if(focus!=null){const i=$('#dl').querySelector('input[data-n="'+focus+'"]');if(i)i.focus()}
+ };
+ paint();
+ const dl=$('#dl');
+ dl.oninput=e=>{const n=e.target.dataset.n;if(n!=null&&e.target.dataset.k==='v')L[+n].v=e.target.value};
+ dl.onchange=e=>{const n=e.target.dataset.n;if(n!=null&&e.target.dataset.k==='t')L[+n].t=e.target.value};
+ dl.onkeydown=e=>{if(e.key==='Enter'&&e.target.dataset.k==='v'){e.preventDefault();const n=+e.target.dataset.n;L.splice(n+1,0,{t:L[n].t==='text'?'text':L[n].t,v:''});paint(n+1)}};
+ dl.onclick=e=>{
+  const m=e.target.closest('[data-mv]'),r=e.target.closest('[data-rm]');
+  if(m){const [n,d]=m.dataset.mv.split(':').map(Number),k=n+d;if(k>=0&&k<L.length){[L[n],L[k]]=[L[k],L[n]];paint()}}
+  else if(r){L.splice(+r.dataset.rm,1);paint()}
+ };
+ dlg.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>{L.push({t:b.dataset.add,v:''});paint(L.length-1)});
  dlg.showModal();
  $('#f3').onchange=e=>$('#pr').classList.toggle('hide',e.target.value!=='sale');
+ $('#ft1').onchange=e=>$('#trw').classList.toggle('hide',!e.target.checked);
  $('#x').onclick=()=>dlg.close();
  $('#sv').onclick=async()=>{
-  const o={...it,title:$('#f1').value.trim(),cat:$('#f2').value,type:$('#f3').value,priceFJD:$('#f4').value,priceUSDT:$('#f5').value,link:$('#f6').value.trim(),desc:$('#f7').value.trim()};
+  const rows=L.map(l=>({t:l.t,v:String(l.v).trim()})).filter(l=>l.v);
+  const plain=rows.map(l=>l.t==='bullet'?'• '+l.v:l.t==='check'?'✓ '+l.v:l.v).join('\n');
+  const o={...it,title:$('#f1').value.trim(),cat:$('#f2').value,type:$('#f3').value,priceFJD:$('#f4').value,priceUSDT:$('#f5').value,link:$('#f6').value.trim(),descList:rows,desc:plain,
+   trial:$('#f3').value==='sale'&&$('#ft1').checked,trialLink:$('#ft2').value.trim(),discordUrl:$('#ft3').value.trim()};
+  o.link=fixUrl(o.link);o.trialLink=fixUrl(o.trialLink);o.discordUrl=fixUrl(o.discordUrl);
   if(!o.title||!o.link){$('#ferr').textContent='Title and download link are required.';return}
   if(o.type==='sale'&&!o.priceFJD){$('#ferr').textContent='Enter a price for sale items.';return}
   if(o.type!=='sale'){o.priceFJD='';o.priceUSDT=''}
+  if(o.trial&&!safeUrl(o.trialLink)){$('#ferr').textContent='Enter the free trial download link, or untick “Offer a free trial”.';return}
+  if(o.discordUrl&&!safeUrl(o.discordUrl)){$('#ferr').textContent='The Discord invite must start with https://';return}
+  if(!o.trial){o.trialLink='';o.discordUrl=''}
   const f=$('#f8').files[0];if(f)o.banner=await shrink(f);
   try{await DB.save('items',o)}catch(e){$('#ferr').textContent=e.message;return}
   dlg.close();refresh();discordItemEvent(it,o);
  };
 }
+function trialDlg(id){
+ const it=items.find(i=>i.id===id);if(!it)return;dlg.className='';
+ const dUrl=safeUrl(it.discordUrl)||safeUrl(DISCORD_INVITE),tUrl=safeUrl(it.trialLink);
+ dlg.innerHTML=`<h2>Free trial: ${esc(it.title)}</h2>
+ <div class="note" style="margin-top:8px"><b>Note:</b> the key will be obtained from the developer in Discord.</div>
+ <div class="row" style="margin-top:16px">${tUrl?`<a class="btn" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(dlLink(tUrl))}" target="_blank" rel="noopener">Download free</a>`:''}${dUrl?`<a class="btn ghost" style="display:inline-flex;align-items:center;text-decoration:none" href="${esc(dUrl)}" target="_blank" rel="noopener">Join our Discord</a>`:''}<span style="flex:1"></span><button class="btn ghost" id="x" type="button">Close</button></div>`;
+ dlg.showModal();$('#x').onclick=()=>dlg.close();
+}
 function shrink(file){return new Promise(res=>{const im=new Image();im.onload=()=>{const w=Math.min(800,im.width),c=document.createElement('canvas');c.width=w;c.height=im.height*w/im.width;c.getContext('2d').drawImage(im,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',.72))};im.src=URL.createObjectURL(file)})}
 function buyDlg(id){
- const it=items.find(i=>i.id===id);
+ const it=items.find(i=>i.id===id);dlg.className='';
  dlg.innerHTML=`<h2>${esc(it.title)}</h2><p style="color:var(--mu);margin:4px 0">Choose a payment method:</p>
  <div class="pay"><label><input type="radio" name="pm" value="M-PAiSA" checked>M-PAiSA<br><b>FJD ${esc(it.priceFJD)}</b></label><label><input type="radio" name="pm" value="Binance Pay">Binance Pay<br><b>${esc(it.priceUSDT||'-')} USDT</b></label></div>
  <div class="note" id="pinfo"></div>
@@ -435,7 +494,7 @@ setInterval(async()=>{
 const UNITS={minutes:1,hours:1,days:1,weeks:1,months:1,lifetime:1};
 const fmtDur=(v,u)=>u==='lifetime'?'Lifetime':v+' '+(+v===1?u.replace(/s$/,''):u);
 const fmtDate=t=>t?new Date(t*1000).toLocaleString():'—';
-const apiCfg=()=>{let u=(localStorage.getItem('nx_api_url')||'').trim().replace(/\/+$/,'');if(u&&!/^https?:\/\//i.test(u))u='https://'+u;return{url:u,token:(localStorage.getItem('nx_api_token')||'').trim()}};
+const apiCfg=()=>{let u=(localStorage.getItem('nx_api_url')||BACKEND_URL||'').trim().replace(/\/+$/,'');if(u&&!/^https?:\/\//i.test(u))u='https://'+u;return{url:u,token:(localStorage.getItem('nx_api_token')||'').trim()}};
 async function api(method,path,body){
  const c=apiCfg();
  const r=await fetch(c.url+'/api/v1'+path,{method,headers:{'X-Admin-Token':c.token,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
@@ -743,7 +802,7 @@ async function discordItemEvent(old,o){
   else return;
   if(event==='new_item'&&(!dc.notify_new_item||!dc.routes.new_item.length))return;
   if(event==='price_change'&&(!dc.notify_price_change||!dc.routes.price_change.length))return;
-  const r=await api('POST','/admin/discord/notify',{event,title:o.title,category:o.cat,type:o.type,price_fjd:o.priceFJD,price_usdt:o.priceUSDT,old_fjd:old.priceFJD||'',old_usdt:old.priceUSDT||'',description:o.desc||'',store_url:location.href.split('#')[0]});
+  const r=await api('POST','/admin/discord/notify',{event,title:o.title,category:o.cat,type:o.type,price_fjd:o.priceFJD,price_usdt:o.priceUSDT,old_fjd:old.priceFJD||'',old_usdt:old.priceUSDT||'',description:o.desc||'',trial:!!o.trial,store_url:location.href.split('#')[0]});
   if(r.sent)toast('📣 Posted to '+r.sent+' Discord channel'+(r.sent>1?'s':''),'ok');
  }catch(e){toast('Discord post failed: '+e.message)}
 }
@@ -802,6 +861,53 @@ $('#view').addEventListener('click',async e=>{
    if(!content&&!title){er.textContent='Write a message first.';return}
    b.disabled=true;try{const r=await api('POST','/admin/discord/send',{channel_ids:ids,content,title,allow_mentions:$('#dp').checked});toast('📣 Sent to '+r.sent+' channel'+(r.sent>1?'s':''),'ok');$('#dm').value='';$('#dt').value=''}finally{b.disabled=false}return}
  }catch(x){if(er)er.textContent=x.message;else alert(x.message)}
+});
+
+
+/* ====== My Licenses (customer view) ====== */
+let myLic={},pubPlans=[],myLicErr='';
+const myKeys=()=>ls.get('nx_keys_'+me.uid,[]);
+async function pubApi(method,path,body){
+ const r=await fetch(apiCfg().url+'/api/v1'+path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+ let j={};try{j=await r.json()}catch(e){}
+ if(!r.ok||j.ok===false)throw new Error(j.message||('HTTP '+r.status));
+ return j;
+}
+function timeLeft(i){
+ if(!i||!i.ok)return '—';
+ if(i.status==='revoked')return 'Revoked';
+ if(i.status==='unused')return 'Starts on first use ('+fmtDur(i.duration.value,i.duration.unit)+')';
+ if(i.lifetime||!i.expires_at)return 'Lifetime';
+ const d=Math.ceil((i.expires_at*1000-Date.now())/864e5);
+ if(i.status==='expired'||d<=0)return 'Expired '+fmtDate(i.expires_at);
+ return d+' day'+(d===1?'':'s')+' left (ends '+fmtDate(i.expires_at)+')';
+}
+function myLicHTML(){
+ const keys=myKeys();
+ return `<div class="bar"><h2 style="font-size:26px">My licenses</h2><span class="tag">${keys.length}</span></div>
+ <div class="row" style="align-items:flex-end"><div style="flex:1;min-width:220px"><label for="mk" style="margin-top:0">Add a license key</label><input id="mk" class="mono" placeholder="NH-XXXX-XXXX-XXXX-XXXX" autocomplete="off"></div><button type="button" class="btn" data-act="mk-add">Add key</button></div>
+ <div class="err" id="mkerr" role="alert"></div>
+ <div class="note" style="margin:0 0 14px">Keys are remembered in this browser for your account. Removing one here does not delete the license. Get a key from an approved order or from our Discord.</div>
+ ${keys.length?`<div class="wrap"><table><thead><tr><th>Key</th><th>App</th><th>Subscription</th><th>Device lock</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>${keys.map((k,n)=>{const i=myLic[k];return `<tr style="--i:${Math.min(n,12)}"><td class="mono">${esc(k)}</td>${i&&i.ok?`<td>${esc(i.app||'—')}${i.version?` <span class="tag">v${esc(i.version)}</span>`:''}</td><td>${esc(i.plan)}<div style="color:var(--mu);font-size:12px">${esc(fmtDur(i.duration.value,i.duration.unit))}</div></td><td>${i.hwid_mode==='hwid'?'HWID locked'+(i.hwid_bound?' (device bound)':''):'Open'}</td><td><span class="st ${esc(i.status)}">${esc(i.status)}</span></td><td>${esc(timeLeft(i))}</td>`:`<td colspan="5" style="color:var(--mu)">${i?esc(i.message||'Not found'):'Loading…'}</td>`}<td><button type="button" class="icon bad" data-act="mk-del" data-t="${esc(k)}" aria-label="Remove key from my list">Remove</button></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No licenses added yet.</div>'}
+ <h3 style="font-size:22px;margin:24px 0 8px">Available subscriptions</h3>
+ ${myLicErr?`<div class="note">${esc(myLicErr)}</div>`:pubPlans.length?`<div class="row">${pubPlans.map(p=>`<span class="tag">${esc(p.name)} · ${esc(fmtDur(p.value,p.unit))}</span>`).join(' ')}</div><div class="note" style="margin-top:10px">Want one of these? Order a product from the Store or ask in our Discord.</div>`:'<div style="color:var(--mu);font-size:14px">None listed yet.</div>'}`;
+}
+async function loadMyLic(){
+ try{pubPlans=(await pubApi('GET','/plans')).plans;myLicErr=''}catch(e){myLicErr='Could not load subscriptions: '+e.message}
+ await Promise.all(myKeys().map(async k=>{try{myLic[k]=await pubApi('POST','/license/info',{key:k})}catch(e){myLic[k]={ok:false,message:e.message}}}));
+ if(tab==='mylic'&&me&&!$('#mk')?.value)$('#view').innerHTML=myLicHTML();
+}
+$('#view').addEventListener('click',async e=>{
+ const b=e.target.closest('[data-act]');if(!b||!me||tab!=='mylic')return;
+ const a=b.dataset.act;if(a!=='mk-add'&&a!=='mk-del')return;
+ const er=$('#mkerr');
+ if(a==='mk-del'){ls.set('nx_keys_'+me.uid,myKeys().filter(k=>k!==b.dataset.t));$('#view').innerHTML=myLicHTML();return}
+ const key=$('#mk').value.trim().toUpperCase();er.textContent='';
+ if(!key){er.textContent='Paste your license key first.';return}
+ if(myKeys().includes(key)){er.textContent='That key is already in your list.';return}
+ b.disabled=true;
+ try{myLic[key]=await pubApi('POST','/license/info',{key});ls.set('nx_keys_'+me.uid,[...myKeys(),key]);$('#view').innerHTML=myLicHTML()}
+ catch(x){er.textContent=x.message}finally{b.disabled=false}
 });
 
 /* ---- particle system ---- */

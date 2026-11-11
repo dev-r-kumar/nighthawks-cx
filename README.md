@@ -25,6 +25,9 @@
 |---|---|---|
 | POST | `/api/v1/license/validate` | body `{"key","hwid"}`. Activates a fresh key (timer starts) and returns app, version, plan, expiry |
 | GET | `/api/v1/fields/<app-slug>/<version or latest>/<field>` | returns one field. Headers `X-License-Key` and `X-HWID` unless the field is marked public |
+| GET | `/api/v1/download/mediafire?url=<share link>` | redirects straight to the real MediaFire file (falls back to the normal MediaFire page if the direct link can't be found). Add `&format=json` to get `{"url"}` instead |
+| GET | `/api/v1/plans` | subscription plans (name and length) for the customer view |
+| POST | `/api/v1/license/info` | body `{"key"}`. Read-only look at a key (app, version, plan, status, expiry). Does not activate or bind a device |
 
 Error replies are `{"ok":false,"code":"...","message":"..."}` with codes: invalid_key, revoked, hwid_required, hwid_mismatch, expired, not_activated, wrong_app, rate_limited.
 
